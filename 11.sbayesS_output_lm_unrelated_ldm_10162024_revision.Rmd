@@ -1,0 +1,1633 @@
+---
+title: "sbayesS_output"
+author: "Yon Ho Jee"
+date: '2024-10-16'
+output: html_document
+---
+#============ Work summary ===========#
+Samples: unrelated
+SNPs: All SNPs
+- `run_sbayesS_lm_unrelated_10132024.sh`
+- `run_sbayesS_KoGES.sh`
+- `run_sbayesS_TWB_lm.sh`
+#=====================================#
+```{r warning=FALSE}
+library(data.table)
+library(tidyverse)
+library(gridExtra)
+library(grid)
+#library(TigR)
+library(ggrepel)
+library(ggpubr)
+```
+# 0. Load trait_list & functions
+```{r}
+# final 36 variables
+trait_list=c("LDL","TG","HDL","CHO","FBS","INSULIN","GOT","GPT","GGT","BIL","ALB","TSH","CEA",
+             "CREAT","ADIPO","URIC","ALP","HB","HCT","MCH","MCHC","MCV","RBC","RDW","WBC","PLT","EOS",
+             "SBP","DBP","WT","HEIGHT","BMI","WAIST","SMOKA_MOD","ALCO_AMOUNT","COFFA")
+
+# 23 variables
+trait_list_TWB=c("ALB","BMI","HEIGHT","WAIST","WT","CREAT","DBP","FBS","GGT","HB","HCT","HDL","LDL","PLT","RBC","GOT","GPT","SBP","BIL","CHO","TG","URIC","WBC")
+#trait_list_TWB=c("ALB","HEIGHT","WAIST","WT","CREAT","DBP","GGT","HB","HCT","HDL","LDL","PLT","RBC","SBP","BIL","CHO","TG","URIC","WBC")
+
+# 22 variables
+trait_list_koges_kcps2<-c("ALB","ALCO_AMOUNT","GPT","GOT","BMI","CREAT","DBP","GGT","FBS","HB","HDL","HEIGHT","HCT","LDL","PLT","RBC","SBP","BIL","CHO","TG","WC","WBC") 
+```
+
+Function to Load parRes outputs and collect estimates across 22 chromosomes (IVW for S, Pi and sum for hsq)
+```{r}
+get_parRes=function(path, trait_list){
+  
+  parRes <- data.frame()
+  
+  for(trait in trait_list){
+  
+    res <- data.frame()
+    res_fn <- paste0(path,trait)
+      
+    file_list=list.files(path=res_fn, pattern = "*.parRes")
+
+    # If trait is "BIL" in TWB, exclude chromosome 2
+    # if (path=="/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Output_TWB/sbayesS/kcps2_ldm/" & trait == "BIL") {
+    #   file_list <- file_list[!grepl("chr2\\.", file_list)]  # Exclude only "chr2"
+    # }
+    
+    for(i in 1:length(file_list)){ # make sure 22
+      data=fread(file = paste0(res_fn,"/",file_list[i]),col.names = c("Par", "Mean", "SD"))
+      data$chr = strsplit(sub(".*chr", "",file_list[i]) , ".", fixed = TRUE)[[1]][1]
+      
+      data_long <- gather(data, est, val, Mean:SD, factor_key=TRUE)
+      res<-rbind(res,data_long)
+    }
+    # tmp <- res%>%filter(Par=="hsq",est=="Mean") # to check hsq(BIL,TWB) on chr2=0.952661
+    data_wide <- res %>%
+      pivot_wider(names_from = c(Par,est), values_from = val) %>%
+      mutate(Pi_Mean_w = (1/Pi_SD^2)/sum(1/Pi_SD^2), S_Mean_w = (1/S_SD^2)/sum(1/S_SD^2),
+             Pi_Mean_ivw = Pi_Mean*Pi_Mean_w, S_Mean_ivw = S_Mean*S_Mean_w)
+    
+    sum_par <- data_wide %>%
+      summarise(
+        across(hsq_Mean, ~sum(.x, na.rm = TRUE), .names = "{.col}_sum"),
+        across(hsq_SD, ~sum(.x^2, na.rm = TRUE), .names = "{.col}2_sum"),
+        across(c(Pi_Mean_ivw, S_Mean_ivw), ~sum(.x, na.rm = TRUE), .names = "{.col}"),
+        across(c(Pi_SD, S_SD), ~sum(.x^(-2), na.rm = TRUE), .names = "{.col}_ivw_denom")
+        ) %>%
+      
+      mutate(trait = trait,
+             Pi_SD_ivw = sqrt(1/Pi_SD_ivw_denom), S_SD_ivw = sqrt(1/S_SD_ivw_denom), hsq_SD_sum = sqrt(hsq_SD2_sum)) %>%
+      
+      select(trait, Pi_Mean_ivw, hsq_Mean_sum, S_Mean_ivw, Pi_SD_ivw, hsq_SD_sum, S_SD_ivw)
+    
+      par_trait_k <- data.frame(trait = rep(trait,3), Par=c("Pi","hsq","S"), 
+                        est=c(sum_par$Pi_Mean_ivw, sum_par$hsq_Mean_sum, sum_par$S_Mean_ivw),
+                        SD = c(sum_par$Pi_SD_ivw, sum_par$hsq_SD_sum, sum_par$S_SD_ivw))
+      parRes <- rbind(parRes, par_trait_k)
+      print(trait)
+  }
+  
+  return(parRes)
+}
+```
+
+Function to Average, median - save in a separate R file and load?
+```{r}
+#Average hsq by traits (2023.10.10 - to sort plot by hsq)
+mean_ft <- function(parRes_df2){
+  parRes_hsq_mean <- parRes_df2 %>%
+      group_by(trait) %>%
+       filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)|!is.na(est_KOGES), Par=="SNP-based heritability") %>%
+  rowwise() %>%
+  mutate(hsq_mean = mean(c(est,est_UKB,est_BBJ,est_TWB,est_KOGES))) %>%
+  select(trait, hsq_mean)
+  return(parRes_hsq_mean)
+}
+
+get_median <- function(parRes_df){
+  parRes_median <- parRes_df %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Pi,hsq,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  return(parRes_median)
+}
+
+#Calculate median for each biobank of each parameter for plot (incl. ukb, bbj, twb)
+#8 overlapping traits across all studies
+median_ft0 <- function(parRes_df2, biobank){
+  if(biobank=="KCPS2") {
+  parRes_median_5_biobank <-   parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="UKB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_UKB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+    } else if(biobank=="BBJ"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_BBJ) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="TWB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_TWB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+   else if(biobank=="KOGES"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_KOGES) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+  return(parRes_median_5_biobank)
+}
+
+median_ft_min <- function(parRes_df2, biobank){
+  if(biobank=="KCPS2") {
+  parRes_median_5_biobank <-   parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~min(.x, na.rm = TRUE), .names = "{.col}_min")
+    )
+  } else if(biobank=="UKB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_UKB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~min(.x, na.rm = TRUE), .names = "{.col}_min")
+    )
+    } else if(biobank=="BBJ"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_BBJ) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~min(.x, na.rm = TRUE), .names = "{.col}_min")
+    )
+  } else if(biobank=="TWB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_TWB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~min(.x, na.rm = TRUE), .names = "{.col}_min")
+    )
+  }
+  else if(biobank=="KOGES"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_KOGES) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~min(.x, na.rm = TRUE), .names = "{.col}_min")
+    )
+  }
+  return(parRes_median_5_biobank)
+}
+
+median_ft_max <- function(parRes_df2, biobank){
+  if(biobank=="KCPS2") {
+  parRes_median_5_biobank <-   parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~max(.x, na.rm = TRUE), .names = "{.col}_max")
+    )
+  } else if(biobank=="UKB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_UKB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~max(.x, na.rm = TRUE), .names = "{.col}_max")
+    )
+    } else if(biobank=="BBJ"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_BBJ) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~max(.x, na.rm = TRUE), .names = "{.col}_max")
+    )
+  } else if(biobank=="TWB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_TWB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~max(.x, na.rm = TRUE), .names = "{.col}_max")
+    )
+  } else if(biobank=="KOGES"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_KOGES) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~max(.x, na.rm = TRUE), .names = "{.col}_max")
+    )
+  }
+  return(parRes_median_5_biobank)
+}
+
+#For non-missing traits for each study
+# all traits
+median_ft <- function(parRes_df2, biobank){
+  if(biobank=="KCPS2") {
+  parRes_median_5_biobank <-   parRes_df2 %>%
+         #filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="UKB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         #filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_UKB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+    } else if(biobank=="BBJ"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         #filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_BBJ) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="TWB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         #filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_TWB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="KOGES"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+         #filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+        pivot_wider(names_from = c(Par), values_from = est_KOGES) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+  return(parRes_median_5_biobank)
+}
+
+# all traits - by category
+median_ft2 <- function(parRes_df2, biobank){
+  if(biobank=="KCPS2") {
+  parRes_median_5_biobank <-   parRes_df2 %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="UKB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_UKB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+    } else if(biobank=="BBJ"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_BBJ) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="TWB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_TWB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+  else if(biobank=="KOGES"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_KOGES) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+  return(parRes_median_5_biobank)
+}
+
+# 8 overlap - by category
+median_ft21 <- function(parRes_df2, biobank){
+  if(biobank=="KCPS2") {
+  parRes_median_5_biobank <-   parRes_df2 %>%
+    filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="UKB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+     filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_UKB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+    } else if(biobank=="BBJ"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+     filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_BBJ) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  } else if(biobank=="TWB"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+     filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_TWB) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+  else if(biobank=="KOGES"){
+   parRes_median_5_biobank <- parRes_df2 %>%
+     filter(!is.na(est_UKB)&!is.na(est_BBJ)&!is.na(est_TWB)&!is.na(est_KOGES)) %>%
+    group_by(category) %>%
+        pivot_wider(names_from = c(Par), values_from = est_KOGES) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  }
+  return(parRes_median_5_biobank)
+}
+
+## Median for all studies (manuscript text) - Calculate median of each parameter for plot
+get_median_all <- function(parRes_df){
+  parRes_median <- parRes_df %>%
+    #filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)) %>%
+    pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~median(.x, na.rm = TRUE), .names = "{.col}_median")
+    )
+  return(parRes_median)
+}
+get_min_all <- function(parRes_df){
+  parRes_min <- parRes_df %>%
+    #filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)) %>%
+    pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+          across(c(Polygenicity,`SNP-based heritability`,S), ~min(.x, na.rm = TRUE), .names = "{.col}_min")
+    )
+  return(parRes_min)
+}
+get_max_all <- function(parRes_df){
+  parRes_max <- parRes_df %>%
+    pivot_wider(names_from = c(Par), values_from = est) %>%
+    summarise(
+      across(c(Polygenicity,`SNP-based heritability`,S), ~max(.x, na.rm = TRUE), .names = "{.col}_max")
+    )
+  return(parRes_max)
+}
+```
+
+# 1. Load sbayesS output 
+## KCPS2
+check if sbayesS successfully run for 22 chrom / 1 for autosome
+```{r}
+for(k in 1:length(trait_list)){
+  res_fn <- paste0("/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Output_KCPS2/sbayesS/SAIGE/lm_remove_related_ldm/",trait_list[k])
+  file_list=list.files(path=res_fn, pattern = "*.parRes")
+  print(paste0("[",k-1,"]",trait_list[k],": ",length(file_list)))
+}
+```
+
+```{r warning=FALSE}
+parRes_df_original <- get_parRes("/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Output_KCPS2/sbayesS/SAIGE/lm_remove_related_ldm/"
+,trait_list)
+parRes_df_KCPS2 <- parRes_df_original
+```
+
+## TWB
+check if sbayesS successfully run for 22 chrom / 1 for autosome
+```{r}
+for(k in 1:length(trait_list_TWB)){
+  res_fn <- paste0("/n/holyscratch01/kraft_lab/yjee/GCTB/Output_TWB/kcps2_ldm/",trait_list_TWB[k])
+  file_list=list.files(path=res_fn, pattern = "*.parRes")
+  print(paste0("[",k-1,"]",trait_list_TWB[k],": ",length(file_list)))
+}
+```
+
+```{r warning=FALSE}
+parRes_df_original_TWB <- get_parRes("/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Output_TWB/sbayesS/kcps2_ldm/",trait_list_TWB)
+parRes_df_TWB <- parRes_df_original_TWB
+dim(parRes_df_TWB) #[1] 69  4
+```
+
+## KoGES
+check if sbayesS successfully run for 22 chrom / 1 for autosome
+```{r}
+for(k in 1:length(trait_list_koges_kcps2)){
+  res_fn <- paste0("/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Output_KOGES/sbayesS/kcps2_ldm/",trait_list_koges_kcps2[k])
+  file_list=list.files(path=res_fn, pattern = "*.parRes")
+  print(paste0("[",k-1,"]",trait_list_koges_kcps2[k],": ",length(file_list)))
+}
+```
+
+```{r warning=FALSE}
+parRes_df_original_KOGES <- get_parRes("/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Output_KOGES/sbayesS/kcps2_ldm/",trait_list_koges_kcps2)
+parRes_df_KOGES <- parRes_df_original_KOGES
+```
+
+## UKB+BBJ: Load Wang_2022 values
+```{r}
+Wang<-read.csv("/n/home03/yjee/Wang_2022_UKB_BBJ.csv")
+Wang_wide <- Wang %>%
+  pivot_wider(names_from = c(pop), values_from = c(est,SD))
+Wang_wide <- Wang_wide %>%
+  mutate(trait=ifelse(trait=="HT","HEIGHT",trait))
+parRes_df_Wang <- left_join(parRes_df_KCPS2, Wang_wide, by=c("trait","Par"))
+```
+
+# 2. Combine all biobanks
+```{r}
+parRes_df_TWB1 <- parRes_df_TWB %>%
+  rename(est_TWB=est, SD_TWB=SD)
+
+parRes_df_ubt <- left_join(parRes_df_Wang, parRes_df_TWB1, by=c("trait","Par"))
+
+parRes_df_KOGES1 <- parRes_df_KOGES %>%
+  rename(est_KOGES=est, SD_KOGES=SD)
+
+parRes_df_ubtk <- left_join(parRes_df_ubt, parRes_df_KOGES1, by=c("trait","Par"))
+
+parRes_df <- parRes_df_ubtk
+```
+
+##Relabel
+```{r}
+parRes_df2<- parRes_df%>% 
+       mutate(category = case_when(
+         (trait %in% c("BMI","HEIGHT","WAIST","WT")) ~ "Anthropometry",
+                                         (trait %in% c("SBP","DBP")) ~ "Cardiovascular",
+                                   (trait %in% c("HB","HCT","MCHC","MCV","RBC","RDW","MCH","WBC","PLT","EOS")) ~ "Hematological",
+                                   (trait %in% c("ALP","CREAT","URIC")) ~ "Kidney",
+                                   (trait %in% c("COFFA","SMOKA_MOD","ALCO_AMOUNT")) ~ "Lifestyle",
+                                   (trait %in% c("ALB","BIL","GGT","GOT","GPT")) ~ "Liver",
+              (trait %in% c("ADIPO","CHO","FBS","HDL","LDL","TG","INSULIN")) ~ "Metabolic",
+              # (trait %in% c("TSH")) ~ "Thyroid hormone",
+              # (trait %in% c("CEA")) ~ "Tumor marker",
+              (trait %in% c("TSH")) ~ "Thyroid",
+              (trait %in% c("CEA")) ~ "Tumor",
+              TRUE ~ ""))
+  
+parRes_df2$category<-factor(parRes_df2$category,levels=c("Anthropometry","Metabolic","Hematological","Cardiovascular","Kidney","Liver",
+# "Thyroid hormone","Tumor marker",
+"Thyroid","Tumor",
+                                                         "Lifestyle"))
+
+parRes_df2$Par<-factor(parRes_df2$Par,levels=c("S","hsq","Pi"))
+levels(parRes_df2$Par) <- c("S","SNP-based heritability","Polygenicity")
+
+parRes_df2$trait_full<-rep(c("Low density lipoprotein","Triglyceride","High density lipoprotein","Total cholestrol","Fasting blood sugar","Insulin","Glutamic oxaloacetic transaminase","Glutamic pyruvic transaminase","Gamma-glutamyl Transferase","Total Bilirubin","Albumin","Thyroid-stimulating hormone","Carcinoembryonic antigen","Creatinine","Adiponectin","Uric acid","Alkaline phosphatase","Hemoglbin","Hematocrit","Mean corpuscular hemoglobin","Mean corpuscular hemoglobin concentration","Mean corpuscular volume","Red blood cell","Red blood cell distribution width","White blood cell","Platelet","Eosinophil","Systolic blood pressure",
+ "Diastolic blood pressure","Weight","Height","Body mass index","Waist circumference",
+ "Smoking amount", "Alcohol intake","Coffee intake"),each=3)
+
+n <- 9
+h1 <- hcl.colors(n, palette = "Dynamic")
+
+parRes_df2 <- parRes_df2%>% 
+       mutate(col_cat = case_when(
+         (category %in% c("Anthropometry")) ~ h1[1],
+         (category %in% c("Cardiovascular")) ~ h1[4],
+         (category %in% c("Hematological")) ~ h1[3],
+         (category %in% c("Kidney")) ~ h1[5],
+         (category %in% c("Lifestyle")) ~ h1[9],
+         (category %in% c("Liver")) ~ h1[6],
+              (category %in% c("Metabolic")) ~ h1[2],
+              # (category %in% c("Thyroid hormone")) ~ h1[7],
+              # (category %in% c("Tumor marker")) ~ h1[8],
+              (category %in% c("Thyroid")) ~ h1[7],
+              (category %in% c("Tumor")) ~ h1[8],
+              (category %in% c("Lifestyle")) ~ h1[9],
+              TRUE ~ ""))
+```
+
+ukb+bbj
+```{r}
+#intv<-rep(c(1:3),3)
+parRes_df_ukbbj_est <- parRes_df2 %>%
+   filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)|!is.na(est_KOGES)) %>%
+   pivot_longer(cols=c(est,est_BBJ,est_UKB,est_TWB,est_KOGES),names_to = "Par_ma",values_to = "est") %>%
+  select(-SD) #%>% 
+  #mutate(number=c(intv,intv+3,intv+3*2,intv+3*3,intv+3*4,intv+3*5,intv+3*6,intv+3*7,intv+3*8,intv+3*9,intv+3*10,intv+3*11))
+
+parRes_df_ukb_sd <- parRes_df2 %>%
+   filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)|!is.na(est_KOGES)) %>%
+   pivot_longer(cols=c(SD,SD_BBJ,SD_UKB,SD_TWB,SD_KOGES),names_to = "Par_ma_SD",values_to = "SD")
+                
+parRes_df_ukbbj<-cbind(parRes_df_ukbbj_est,parRes_df_ukb_sd[,c("Par_ma_SD","SD")])
+```
+
+```{r}
+parRes_hsq_mean <- mean_ft(parRes_df2)
+parRes_df_ukbbj2 <- left_join(parRes_df_ukbbj, parRes_hsq_mean, by="trait") #sort by hsq_mean
+```
+
+# 3. Summaries 
+```{r}
+parRes_df_KCPS2_pi <- parRes_df_KCPS2 %>%
+  filter(Par=="Pi")
+```
+
+
+Calculate median of each parameter for plot
+```{r}
+parRes_median_KCPS2 <- get_median(parRes_df_KCPS2)
+parRes_median_TWB <- get_median(parRes_df_TWB)
+parRes_median_KOGES <- get_median(parRes_df_KOGES)
+
+parRes_median_KCPS2
+parRes_median_TWB
+parRes_median_KOGES
+```
+
+manuscript text
+## 8 overlap traits across all studies
+```{r}
+median_ft0(parRes_df2,"KCPS2")
+# median_ft_min(parRes_df2,"KCPS2")
+# median_ft_max(parRes_df2,"KCPS2")
+
+median_ft0(parRes_df2,"KOGES")
+# median_ft_min(parRes_df2,"KOGES")
+# median_ft_max(parRes_df2,"KOGES")
+
+median_ft0(parRes_df2,"BBJ")
+# median_ft_min(parRes_df2,"BBJ")
+# median_ft_max(parRes_df2,"BBJ")
+
+median_ft0(parRes_df2,"TWB")
+# median_ft_min(parRes_df2,"TWB")
+# median_ft_max(parRes_df2,"TWB")
+
+median_ft0(parRes_df2,"UKB")
+# median_ft_min(parRes_df2,"UKB")
+# median_ft_max(parRes_df2,"UKB")
+```
+
+```{r}
+(parRes_median_5_kcps2 <- median_ft(parRes_df2,"KCPS2"))
+#  Pi_median hsq_median S_median
+# 0.005363095	0.2030605	-0.4976026		
+
+(parRes_median_5_koges <- median_ft(parRes_df2,"KOGES"))
+#  Pi_median hsq_median S_median
+# 0.001500552	0.2099825	-0.4504551		
+
+(parRes_median_5_ukb <- median_ft(parRes_df2,"UKB"))
+#  Pi_median hsq_median S_median
+# 0.017725	0.226	-0.604	
+
+(parRes_median_5_bbj <- median_ft(parRes_df2,"BBJ"))
+#  Polygenicity_median `SNP-based heritability_median` S_median
+# 0.00681	0.1135	-0.4485
+
+(parRes_median_5_twb <- median_ft(parRes_df2,"TWB"))
+#  Polygenicity_median `SNP-based heritability_median` S_median
+# 0.0009841488	0.2153595	-0.4862567	
+```
+run upto here and go to Plot UKB+BBJ+TWB
+
+## All traits
+```{r}
+get_median_all(parRes_df2)
+get_min_all(parRes_df2)
+get_max_all(parRes_df2)
+```
+
+## By category
+All traits - by category
+```{r}
+median_ft2(parRes_df2,"KCPS2")
+median_ft2(parRes_df2,"KOGES")
+median_ft2(parRes_df2,"BBJ")
+median_ft2(parRes_df2,"TWB")
+median_ft2(parRes_df2,"UKB")
+```
+
+8 overlap - by category
+```{r}
+median_ft21(parRes_df2,"KCPS2")
+median_ft21(parRes_df2,"KOGES")
+median_ft21(parRes_df2,"BBJ")
+median_ft21(parRes_df2,"TWB")
+median_ft21(parRes_df2,"UKB")
+```
+
+### Revision
+Per reviewer, restrict to same list of traits for a given category & biobank pair comparison.
+```{r}
+library(dplyr)
+library(ggpubr)
+
+# Define the parameters to test
+parameters <- c("Polygenicity", "SNP-based heritability", "S")
+
+# Perform Wilcoxon signed-rank test between est and est_BBJ for each parameter within each category
+# Define a function for the statistical test
+compare_medians <- function(df, comparison_column) {
+  df <- parRes_df2
+  # Define the parameters to test
+  parameters <- c("Polygenicity", "SNP-based heritability", "S")
+  
+  # Initialize an empty dataframe to store results
+  results <- data.frame()
+  
+  # Loop over each parameter
+  for (param in parameters) {
+    
+    # Filter for the current parameter and remove NAs
+    df_param <- df %>% 
+      filter(Par == param, !is.na(est), !is.na(!!sym(comparison_column)))
+    
+    # Group by category and perform the Wilcoxon signed-rank test for each category
+    result_param <- df_param %>%
+      group_by(category) %>%
+      summarise(
+        p_value = wilcox.test(est, !!sym(comparison_column), paired = TRUE)$p.value,
+        median_est = median(est, na.rm = TRUE),
+        median_comparison = median(!!sym(comparison_column), na.rm = TRUE),
+        n_comparisons = n()  # Count the number of paired comparisons
+      ) %>%
+      mutate(Par = param)  # Add the parameter name to the results
+    
+    # Append to the results dataframe
+    results <- rbind(results, result_param)
+  }
+  
+  # Return the results
+  return(results)
+}
+```
+
+```{r}
+# Merge the dataframes by Par and category, and rename columns
+merge_and_rename <- function(a0, a1, a2, a3) {
+  # Merge the dataframes by Par and category
+  merged_df <- a0 %>%
+    rename_with(~paste0("KCPS2-KOGES_", .), -c(Par, category)) %>% # Rename a0 columns
+    full_join(
+      a1 %>% rename_with(~paste0("KCPS2-BBJ_", .), -c(Par, category)),
+      by = c("Par", "category")
+    ) %>%
+    full_join(
+      a2 %>% rename_with(~paste0("KCPS2-TWB_", .), -c(Par, category)),
+      by = c("Par", "category")
+    ) %>%
+    full_join(
+      a3 %>% rename_with(~paste0("KCPS2-UKB_", .), -c(Par, category)),
+      by = c("Par", "category")
+    )
+  
+  # Return the merged dataframe
+  return(merged_df)
+}
+
+# Call the function
+merged_df <- merge_and_rename(a0, a1, a2, a3) %>%
+  select(Par, everything())
+
+fwrite(merged_df,"/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/genetic_architecture_Wilcoxon.csv")
+```
+
+```{r}
+parRes_df2_hema <- parRes_df2 %>%
+  filter(category=="Hematological",Par=="SNP-based heritability") %>%
+    summarise(
+    median_est = median(est, na.rm = TRUE),
+    min_est = min(est, na.rm = TRUE),
+    max_est = max(est, na.rm = TRUE),
+    
+    median_est_UKB = median(est_UKB, na.rm = TRUE),
+    min_est_UKB = min(est_UKB, na.rm = TRUE),
+    max_est_UKB = max(est_UKB, na.rm = TRUE),
+    
+    median_est_BBJ = median(est_BBJ, na.rm = TRUE),
+    min_est_BBJ = min(est_BBJ, na.rm = TRUE),
+    max_est_BBJ = max(est_BBJ, na.rm = TRUE),
+    
+    median_est_TWB = median(est_TWB, na.rm = TRUE),
+    min_est_TWB = min(est_TWB, na.rm = TRUE),
+    max_est_TWB = max(est_TWB, na.rm = TRUE),
+    
+    median_est_KOGES = median(est_KOGES, na.rm = TRUE),
+    min_est_KOGES = min(est_KOGES, na.rm = TRUE),
+    max_est_KOGES = max(est_KOGES, na.rm = TRUE)
+  )
+
+```
+
+
+# ################
+# Scatter plot of h2
+# ################
+## Revision
+```{r}
+parRes_df3<-parRes_df2 %>%
+  filter(Par=="SNP-based heritability") 
+
+#cbPalette <- c("darkgrey", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+cbPalette <- h1
+
+ss0 <- parRes_df3 %>%
+  filter(!is.na(est)&!is.na(est_KOGES)) %>%
+  ggscatter(x="est",y="est_KOGES", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in KoGES")
+
+ss1 <- parRes_df3 %>%
+  filter(!is.na(est)&!is.na(est_BBJ)) %>%
+  ggscatter(x="est",y="est_BBJ", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in BBJ")
+
+ss2 <- parRes_df3 %>%
+  filter(!is.na(est)&!is.na(est_TWB)) %>%
+  ggscatter(x="est",y="est_TWB", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in TWB")
+
+ss3 <- parRes_df3 %>%
+  filter(!is.na(est)&!is.na(est_UKB)) %>%
+  ggscatter(x="est",y="est_UKB", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in UKB")
+
+bigss <- ggarrange(plotlist = list(ss0, ss1, ss2,ss3), ncol = 4, common.legend=T, legend="right", labels = c("b", "c", "d","e"),font.label=list(size=20))
+```
+
+# Compare h2 with TWB paper (Chen_2023)
+```{r}
+Chen_TWB_h2 <- data.frame(trait=c("HEIGHT","WT","BMI","BFR","WAIST","HC","WHR","BMD-T","BMD-Z","DBP","SBP","HR","WBC","RBC","HB","HCT","PLT","BUN","CREAT","mALB","URIC","BIL","GPT","GOT","GGT","AFP","ALB","FEV1","FVC","FEV1R","FBS","HbA1c","CHO","HDL","LDL","TG"),
+                          h2_Chen=c(0.3838,0.2553,0.2256,0.1864,0.1631,0.2215,0.1188,0.2494,0.2491,0.1449,0.1482,0.1224,0.1678,0.1868,0.1148,0.1036,0.2496,0.1360,0.1982,0.0668,0.2078,0.1842,0.1151,0.1052,0.1901,0.2243,0.1456,0.0545,0.1873,0.0092,0.1558,0.1959,0.1689,0.2360,0.1325,0.2249),
+                          SD_Chen = c(0.0222,0.0132,0.0125,0.0114,0.0105,0.0126,0.0097,0.0208,0.0209,0.0118,0.0142,0.0146,0.0151,0.0212,0.0119,0.0102,0.0301,0.0149,0.0165,0.0088,0.0460,0.1047,0.0138,0.0163,0.0234,0.0405,0.0145,0.0100,0.0160,0.0090,0.0195,0.0529,0.0223,0.0316,0.0210,0.0515))  
+
+parRes_df4 <-parRes_df2 %>%
+  filter(Par=="SNP-based heritability") %>% 
+  select(trait,est_TWB,category)
+TWB_merged <- inner_join(parRes_df4, Chen_TWB_h2, by="trait") %>% #23
+  filter(!is.na(est_TWB)&!is.na(h2_Chen)) 
+s4 <- TWB_merged %>%
+  ggplot(aes(est_TWB,h2_Chen,col=trait))+ 
+  geom_point(position = position_dodge(0.5), size = 5)+
+  ggpubr::theme_pubr(border = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  xlim(0,1) + ylim(0,1) + xlab("Heritability in TWB using SbayesS (KCPS2 LDM)") + ylab("Heritability in TWB using LDSC (in-sample LD") + theme(legend.position = "right")
+
+s4 <- TWB_merged %>%
+  ggplot(aes(est_TWB,h2_Chen,col=category))+ 
+  geom_point(position = position_dodge(0.5), size = 5)+
+  # geom_label(
+  #   label=TWB_merged$trait,
+  #   nudge_x = 0.01, 
+  #   check_overlap = T) +
+  geom_label_repel(
+    aes(label=trait), size=4, box.padding = unit(0.5, "lines")
+  )+
+  ggpubr::theme_pubr(border = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  xlim(0,0.7) + ylim(0,0.7) + xlab("Heritability in TWB (SbayesS, KCPS2 LD)") + ylab("Heritability in TWB reported by Chen et al(2023) (LDSC, in-sample LD)") + theme(legend.position = "none")
+
+```
+
+```{r}
+parRes_df2_Chen <- left_join(parRes_df2, Chen_TWB_h2, by=c("trait")) %>%
+  mutate(est_TWB_new = ifelse(Par=="SNP-based heritability",h2_Chen,est_TWB),
+         SD_TWB_new = ifelse(Par=="SNP-based heritability",SD_Chen,SD_TWB)) %>%
+  dplyr::select(-c(est_TWB,SD_TWB)) %>%
+  rename(est_TWB=est_TWB_new, SD_TWB=SD_TWB_new)
+
+parRes_df_ukbbj_est_Chen <- parRes_df2_Chen %>%
+   filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)) %>%
+   pivot_longer(cols=c(est,est_BBJ,est_TWB,est_UKB),names_to = "Par_ma",values_to = "est") %>%
+  select(-SD) 
+parRes_df_ukb_sd_Chen <- parRes_df2_Chen %>%
+   filter(!is.na(est_UKB)|!is.na(est_BBJ)|!is.na(est_TWB)) %>%
+   pivot_longer(cols=c(SD,SD_BBJ,SD_TWB,SD_UKB),names_to = "Par_ma_SD",values_to = "SD")
+                
+parRes_df_ukbbj_Chen<-cbind(parRes_df_ukbbj_est_Chen, parRes_df_ukb_sd_Chen[,c("Par_ma_SD","SD")])
+```
+
+## Recalculate mean and median
+```{r}
+parRes_hsq_mean_Chen <- mean_ft(parRes_df2_Chen)
+
+parRes_df_ukbbj2_Chen <- left_join(parRes_df_ukbbj_Chen, parRes_hsq_mean_Chen, by="trait")
+
+parRes_median_5_twb_Chen <- median_ft(parRes_df2_Chen,"TWB")
+```
+
+```{r}
+median_ft2(parRes_df2_Chen,"KCPS2")
+median_ft2(parRes_df2_Chen,"KOGES")
+median_ft2(parRes_df2_Chen,"UKB")
+median_ft2(parRes_df2_Chen,"BBJ")
+median_ft2(parRes_df2_Chen,"TWB")
+```
+
+## Redraw scattor plot
+```{r}
+cbPalette <- c("#DB9D85", "#BFAA67", "#93B666", "#5CBD92", "#38BDBB", "#6CB4D9")
+
+parRes_df3_Chen<-parRes_df2_Chen %>%
+  filter(Par=="SNP-based heritability") 
+
+s4 <- TWB_merged %>%
+  ggscatter(x="est_TWB",y="h2_Chen", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  #xlab("Heritability in TWB (current study)") + ylab("Heritability in TWB (Chen et al.(2023))") +
+  xlab("Heritability in TWB \n(sbayesS, KCPS2 LD)") + ylab("Heritability in TWB reported by Chen et al (2023) \n(LDSC, in-sample LD)") + theme(legend.position = "none")
+
+
+
+k2 <- parRes_df3_Chen %>%
+  filter(!is.na(est)&!is.na(est_TWB)) %>%
+  ggscatter(x="est",y="est_TWB", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  #theme(legend.position = c(0.8,0.75)) +
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  xlab("Heritability in KCPS2") + 
+  #ylab("Heritability in TWB (Chen et al.(2023))")
+  ylab("Heritability in TWB")
+```
+
+Combine scatter plots for comparing est_TWB vs. h2_Chen
+```{r}
+#grid.arrange(s4,k2,ncol=2)
+ggarrange(s4,k2,ncol=2, common.legend=T, legend="right", labels = c("A", "B"))
+
+```
+```{r}
+pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/h2_twb_Chen_KCPS2_10082024.pdf', height=8, width=15)
+ggarrange(s4,k2,ncol=2, common.legend=T, legend="right", labels = c("a", "b"),font.label=list(size=20))
+dev.off()
+```
+
+Supplementary Figure6ab
+```{r}
+#grid.arrange(s4,k2,ncol=2)
+ggarrange(s4,ss2,ncol=2, common.legend=T, legend="right", labels = c("a", "b"))
+
+```
+
+Main figure in manuscript (10/24/2024)
+```{r}
+bigss_Chen <- ggarrange(plotlist = list(ss0, ss1, k2,ss3), ncol = 4, common.legend=T, legend="right", labels = c("b", "c", "d","e"),font.label=list(size=20))
+```
+
+### 10/23/2024
+### Add cor(8 overlap traits) in the scatter plot
+```{r}
+trait_list_ovlp <- c("HEIGHT","BMI","PLT","RBC","WBC","HB","SBP","DBP")
+parRes_df3_ovlp <- parRes_df3 %>%
+  filter(trait %in% trait_list_ovlp)
+parRes_df3_Chen_ovlp <- parRes_df3_Chen %>%
+  filter(trait %in% trait_list_ovlp)
+
+# Perform correlation tests
+cor1 <- cor.test(parRes_df3_ovlp$est, parRes_df3_ovlp$est_KOGES, method = "pearson", use = "complete.obs")
+cor2 <- cor.test(parRes_df3_ovlp$est, parRes_df3_ovlp$est_BBJ, method = "pearson", use = "complete.obs")
+cor3 <- cor.test(parRes_df3_ovlp$est, parRes_df3_Chen_ovlp$est_TWB, method = "pearson", use = "complete.obs")
+cor4 <- cor.test(parRes_df3_ovlp$est, parRes_df3_ovlp$est_UKB, method = "pearson", use = "complete.obs")
+
+# Create the scatter plots with the correlation and p-value annotations
+ss0 <- parRes_df3 %>%
+  filter(!is.na(est) & !is.na(est_KOGES)) %>%
+  ggscatter(x = "est", y = "est_KOGES", color = "category", size = 3, 
+            label = "trait", repel = TRUE, add = "none", conf.int = TRUE, 
+            cor.coef = TRUE, cor.method = "pearson") + 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") + 
+  scale_colour_manual(values = cbPalette) +
+  xlim(0, 1) + ylim(0, 1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in KoGES") +
+  annotate("text", x = 0.4, y = 0.9, 
+           label = paste0("R = ", round(cor1$estimate, 3), 
+                          " (p = ", format(cor1$p.value, digits = 3), ") for 8 traits available in all studies"),
+           size = 3, color = "black")
+
+ss1 <- parRes_df3 %>%
+  filter(!is.na(est) & !is.na(est_BBJ)) %>%
+  ggscatter(x = "est", y = "est_BBJ", color = "category", size = 3, 
+            label = "trait", repel = TRUE, add = "none", conf.int = TRUE, 
+            cor.coef = TRUE, cor.method = "pearson") + 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") + 
+  scale_colour_manual(values = cbPalette) +
+  xlim(0, 1) + ylim(0, 1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in BBJ") +
+  annotate("text", x = 0.4, y = 0.9, 
+           label = paste0("R = ", round(cor2$estimate, 3), 
+                          " (p = ", format(cor2$p.value, digits = 3), ") for 8 traits available in all studies"),
+           size = 3, color = "black")
+
+k2 <- parRes_df3_Chen %>%
+  filter(!is.na(est)&!is.na(est_TWB)) %>%
+  ggscatter(x="est",y="est_TWB", color="category", size = 3, 
+            label = "trait", repel = TRUE,
+          add = "none", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson")+ 
+  ggpubr::theme_pubr(border = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype="dotted") + 
+  #theme(legend.position = c(0.8,0.75)) +
+  scale_colour_manual(values=cbPalette)+
+  # xlim(0,0.7) + ylim(0,0.7) + 
+  xlim(0,1) + ylim(0,1) + 
+  xlab("Heritability in KCPS2") + 
+  #ylab("Heritability in TWB (Chen et al.(2023))")
+  ylab("Heritability in TWB") +
+  annotate("text", x = 0.4, y = 0.9, 
+           label = paste0("R = ", round(cor3$estimate, 3), 
+                          " (p = ", format(cor3$p.value, digits = 3), ") for 8 traits available in all studies"),
+           size = 3, color = "black")
+
+ss3 <- parRes_df3 %>%
+  filter(!is.na(est) & !is.na(est_UKB)) %>%
+  ggscatter(x = "est", y = "est_UKB", color = "category", size = 3, 
+            label = "trait", repel = TRUE, add = "none", conf.int = TRUE, 
+            cor.coef = TRUE, cor.method = "pearson") + 
+  ggpubr::theme_pubr(border = TRUE) + theme(legend.position = "none") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") + 
+  scale_colour_manual(values = cbPalette) +
+  xlim(0, 1) + ylim(0, 1) + 
+  xlab("Heritability in KCPS2") + ylab("Heritability in UKB") +
+  annotate("text", x = 0.4, y = 0.9, 
+           label = paste0("R = ", round(cor4$estimate, 3), 
+                          " (p = ", format(cor4$p.value, digits = 3), ") for 8 traits available in all studies"),
+           size = 3, color = "black")
+
+# Show the plots
+ggarrange(plotlist = list(ss0, ss1, k2,ss3), ncol = 4, nrow=1, common.legend=T, legend="right", font.label=list(size=20), labels = c("b", "c", "d","e"))
+
+```
+
+# #################
+#Plot UKB+KoGES+BBJ+TWB
+# #################
+### Plot separately to adjust xlim in each Par
+```{r}
+library(ggh4x)
+#cbPalette <- c("#DB9D85", "#BFAA67", "#93B666", "#5CBD92", "#38BDBB", "#6CB4D9")
+cbPalette <- h1
+ridiculous_strips <- strip_themed(
+     background_y = elem_list_rect(
+       fill = cbPalette
+     ),
+     text_y = elem_list_text(angle = c(360,360,360,360,360,360),
+                             face = rep("bold", 6),
+                             size=c(10,12,10,10,11,12)),
+     by_layer_y = FALSE
+)
+
+parRes_df_ukbbj2$category<-factor(parRes_df_ukbbj2$category,levels=c(
+  "Anthropometry","Metabolic","Hematological","Cardiovascular","Kidney","Liver",
+  "Lifestyle"))
+
+parRes_df_ukbbj2$trait_full <- factor(
+  parRes_df_ukbbj2$trait_full, 
+  levels = c(
+   "Alcohol intake",
+  "Gamma-glutamyl Transferase","Glutamic pyruvic transaminase","Albumin","Total Bilirubin","Glutamic oxaloacetic transaminase",
+  "Creatinine","Uric acid",
+  "Diastolic blood pressure","Systolic blood pressure",
+  "Mean corpuscular hemoglobin","Mean corpuscular hemoglobin concentration","Mean corpuscular volume","Eosinophil","Platelet","White blood cell","Red blood cell","Hematocrit","Hemoglbin",
+  "High density lipoprotein","Triglyceride","Total cholestrol","Low density lipoprotein","Fasting blood sugar",
+  "Height","Body mass index","Weight","Waist circumference"))
+```
+
+
+#### Create custom ylim function to handle outliers
+```{r}
+library(ggh4x)
+library(ggplot2)
+
+add_arrows_for_outliers <- function(data, y_limits, point_width = 1, arrow_length = 0.05, trait_name = "Total Bilirubin") {
+  # Identify points that are outliers based on the specified y limits
+  data_outliers <- data %>%
+    mutate(ymin = est - 1.96 * SD,
+           ymax = est + 1.96 * SD) %>%
+    filter(ymax > y_limits[2] | ymin < y_limits[1], trait_full == trait_name)  # Filter by specific trait
+  
+  # Adjust points so outliers are shown as arrows at the boundaries
+  data_outliers <- data_outliers %>%
+    mutate(
+      ymin_clipped = ifelse(ymin < y_limits[1], y_limits[1], ymin),
+      ymax_clipped = ifelse(ymax > y_limits[2], y_limits[2], ymax),
+      arrow_direction = ifelse(ymax > y_limits[2], "up", "down")
+    )
+  
+  # Add arrows for the outliers
+  arrow_segments <- list(
+    geom_segment(data = data_outliers %>% filter(arrow_direction == "up"),
+                 aes(x = trait_full, xend = trait_full, y = y_limits[2] - arrow_length, yend = y_limits[2]),
+                 arrow = arrow(type = "closed", length = unit(arrow_length, "npc")), color = "#00BFC4"),  # Set arrow color to TWB color
+    geom_segment(data = data_outliers %>% filter(arrow_direction == "down"),
+                 aes(x = trait_full, xend = trait_full, y = y_limits[1] + arrow_length, yend = y_limits[1]),
+                 arrow = arrow(type = "closed", length = unit(arrow_length, "npc")), color = "#00BFC4")  # Set arrow color to TWB color
+  )
+  
+  return(arrow_segments)
+}
+```
+
+```{r}
+z01<-parRes_df_ukbbj2 %>%
+  filter(Par=="S") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z1 <- z01 %>%
+ ggplot(aes(x = trait_full, y = est, 
+                colour = factor(Par_ma, levels = c("est", "est_KOGES", "est_BBJ", "est_TWB", "est_UKB")), 
+                shape = factor(Par_ma, levels = c("est", "est_KOGES", "est_BBJ", "est_TWB", "est_UKB"))
+                                         )) + 
+  geom_point(position = position_dodge(width = 0.7), size = 3) + # Plot points
+  geom_pointrange(aes(ymin = est - 1.96 * SD, ymax = est + 1.96 * SD), position = position_dodge(width = 0.7)) + # Add error bars
+  coord_flip() +  # Flip coordinates to make the y-axis horizontal
+  facet_grid2(category ~ Par, scales = "free", space = "free_y") +
+  # Adding vertical lines (which will appear as horizontal lines due to coord_flip)
+  geom_vline(xintercept = seq(0.5, length(unique(parRes_df_ukbbj2$trait)) - 0.5, by = 1), color = "grey80", linetype = "solid") +
+  
+  # Set legend and color settings
+  labs(col = "", shape = "") +  # Label for both color and shape
+    scale_color_manual(labels = c("KCPS2","KoGES","BBJ","TWB","UKB"), values = c("#619CFF",'darkorange',"#C77CFF","#00BFC4","green4")) +
+  scale_shape_manual(labels = c("KCPS2","KoGES", "BBJ", "TWB", "UKB"), 
+                     values = c(16, 25, 17, 15, 18)) +  # Match shape and color labels
+                     # values=c("\u26ab","\u25BC","\25b2","\u25fc","\u25c6"))+
+  
+  ggpubr::theme_pubr(border = TRUE) +
+  
+  labs(x = NULL, y = NULL) +
+  ylim(-1.5,0.8) +
+  
+  # Add dashed vertical lines (flipped to horizontal due to coord_flip) for median lines
+  geom_hline(yintercept = parRes_median_5_kcps2$S_median, linetype = 'dashed', col = '#619CFF')  +
+    geom_hline(yintercept = parRes_median_5_koges$S_median, linetype = 'dashed', col = 'darkorange')  +
+  geom_hline(yintercept = parRes_median_5_bbj$S_median, linetype = 'dashed', col = '#C77CFF') +
+  geom_hline(yintercept = parRes_median_5_twb$S_median, linetype = 'dashed', col = '#00BFC4') +
+  geom_hline(yintercept = parRes_median_5_ukb$S_median, linetype = 'dashed', col = 'green4') +
+  
+  theme(legend.position = "none",
+        strip.text.y = element_blank(),
+        strip.text.x = element_text(angle = 0, size = 15, face = "bold"))
+
+z02<-parRes_df_ukbbj2 %>%
+  filter(Par=="SNP-based heritability") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z2 <- z02 %>%
+ ggplot(aes(x = trait_full, y = est, 
+                colour = factor(Par_ma, levels = c("est", "est_KOGES", "est_BBJ", "est_TWB", "est_UKB")), 
+                shape = factor(Par_ma, levels = c("est", "est_KOGES", "est_BBJ", "est_TWB", "est_UKB"))
+                                         )) + 
+  geom_point(position = position_dodge(width = 0.7), size = 3) + # Plot points
+  geom_pointrange(aes(ymin = est - 1.96 * SD, ymax = est + 1.96 * SD), position = position_dodge(width = 0.7)) + # Add error bars
+  coord_flip() +  # Flip coordinates to make the y-axis horizontal
+  facet_grid2(category ~ Par, scales = "free", space = "free_y") +
+  # Adding vertical lines (which will appear as horizontal lines due to coord_flip)
+  geom_vline(xintercept = seq(0.5, length(unique(parRes_df_ukbbj2$trait)) - 0.5, by = 1), color = "grey80", linetype = "solid") +
+  
+  # Set legend and color settings
+  labs(col = "", shape = "") +  # Label for both color and shape
+    scale_color_manual(labels = c("KCPS2","KoGES","BBJ","TWB","UKB"), values = c("#619CFF",'darkorange',"#C77CFF","#00BFC4","green4")) +
+  scale_shape_manual(labels = c("KCPS2","KoGES", "BBJ", "TWB", "UKB"), values = c(16, 25, 17, 15, 18)) +  # Match shape and color labels
+  
+  ggpubr::theme_pubr(border = TRUE) +
+  
+  labs(x = NULL, y = NULL) +
+  ylim(0,0.8) +
+  
+  # Add arrows for outliers
+  add_arrows_for_outliers(z02, y_limits = c(0, 0.8), trait_name = "Total Bilirubin") +  # Adjusted arrow length and positioning
+
+  # Add dashed vertical lines (flipped to horizontal due to coord_flip) for median lines
+  geom_hline(yintercept = parRes_median_5_kcps2$`SNP-based heritability_median`, linetype = 'dashed', col = '#619CFF')  +
+    geom_hline(yintercept = parRes_median_5_koges$`SNP-based heritability_median`, linetype = 'dashed', col = 'darkorange')  +
+  geom_hline(yintercept = parRes_median_5_bbj$`SNP-based heritability_median`, linetype = 'dashed', col = '#C77CFF') +
+  geom_hline(yintercept = parRes_median_5_twb$`SNP-based heritability_median`, linetype = 'dashed', col = '#00BFC4') +
+  geom_hline(yintercept = parRes_median_5_ukb$`SNP-based heritability_median`, linetype = 'dashed', col = 'green4') +
+  
+  theme(legend.position = "none",
+        strip.text.y = element_blank(),
+        axis.text.y=element_blank(),
+        strip.text.x = element_text(angle = 0, size = 15, face = "bold"))
+
+z03<-parRes_df_ukbbj2 %>%
+  filter(Par=="Polygenicity") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z3 <- z03 %>%
+ ggplot(aes(x = trait_full, y = est, 
+                colour = factor(Par_ma, levels = c("est", "est_KOGES", "est_BBJ", "est_TWB", "est_UKB")), 
+                shape = factor(Par_ma, levels = c("est", "est_KOGES", "est_BBJ", "est_TWB", "est_UKB"))
+                                         )) + 
+  geom_point(position = position_dodge(width = 0.7), size = 3) + # Plot points
+  geom_pointrange(aes(ymin = est - 1.96 * SD, ymax = est + 1.96 * SD), position = position_dodge(width = 0.7)) + # Add error bars
+  coord_flip() +  # Flip coordinates to make the y-axis horizontal
+  facet_grid2(category ~ Par, scales = "free", space = "free_y", labeller = label_wrap_gen(width = 2, multi_line = TRUE), strip = ridiculous_strips) +
+  # Adding vertical lines (which will appear as horizontal lines due to coord_flip)
+  geom_vline(xintercept = seq(0.5, length(unique(parRes_df_ukbbj2$trait)) - 0.5, by = 1), color = "grey80", linetype = "solid") +
+  
+  # Set legend and color settings
+  labs(col = "", shape = "") +  # Label for both color and shape
+    scale_color_manual(labels = c("KCPS2","KoGES","BBJ","TWB","UKB"), values = c("#619CFF",'darkorange',"#C77CFF","#00BFC4","green4")) +
+  scale_shape_manual(labels = c("KCPS2","KoGES", "BBJ", "TWB", "UKB"), values = c(16, 25, 17, 15, 18)) +  # Match shape and color labels
+  
+  ggpubr::theme_pubr(border = TRUE) +
+  
+  labs(x = NULL, y = NULL) +
+  ylim(0,0.06) +
+  
+  # Override aesthetics in the legend to modify error bar appearance
+  guides(
+    color = guide_legend(override.aes = list(
+      linetype = 0, # Remove line from the legend key
+      size = 1      # Increase the size of the points in the legend
+    )),
+    shape = guide_legend(override.aes = list(
+      linetype = 0, # Remove line from the legend key
+      size = 1      # Increase the size of the points in the legend
+    )),
+    # Modify error bars to appear horizontal in the legend by adjusting their height and width
+    linetype = guide_legend(override.aes = list(
+      ymin = 0, ymax = 0, width = 0.2  # Flatten the error bars horizontally
+    ))
+  ) +
+  
+  # Add dashed vertical lines (flipped to horizontal due to coord_flip) for median lines
+  geom_hline(yintercept = parRes_median_5_kcps2$Polygenicity_median, linetype = 'dashed', col = '#619CFF')  +
+    geom_hline(yintercept = parRes_median_5_koges$Polygenicity_median, linetype = 'dashed', col = 'darkorange')  +
+  geom_hline(yintercept = parRes_median_5_bbj$Polygenicity_median, linetype = 'dashed', col = '#C77CFF') +
+  geom_hline(yintercept = parRes_median_5_twb$Polygenicity_median, linetype = 'dashed', col = '#00BFC4') +
+  geom_hline(yintercept = parRes_median_5_ukb$Polygenicity_median, linetype = 'dashed', col = 'green4') +
+  
+  theme(legend.position = "top", 
+        legend.text = element_text(size=20),
+        axis.text.y=element_blank(),
+        strip.text.x = element_text(angle = 0, size = 15, face = "bold"))
+
+```
+
+```{r}
+#extract legend
+#https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+mylegend<-g_legend(z3)
+
+bigz <- grid.arrange(mylegend,
+             arrangeGrob(z1 + theme(legend.position="none"),
+                         z2 + theme(legend.position="none"),
+                         z3 + theme(legend.position="none"),
+                         nrow=1),
+             nrow=2,heights=c(1, 10))
+```
+
+```{r}
+bigss_Chen <- ggarrange(plotlist = list(ss0, ss1, k2,ss3), ncol = 4, common.legend=T, legend="right", labels = c("b", "c", "d","e"),font.label=list(size=20))
+
+pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/merged_genetic_architecture_kcps2_koges_bbj_twb_ukb_lm_Chen_unrelated_ldm_10162024.pdf', height=8, width=15)
+ggarrange(bigz,bigss_Chen,labels = c("a"), nrow=2,font.label=list(size=20))
+dev.off()
+```
+
+
+# Replace TWB_h2 by Chen's estimates
+```{r}
+# parRes_df_ukbbj2 <- parRes_df_ukbbj2 %>%
+#   filter(category %in% c("Anthropometry"))
+z01<-parRes_df_ukbbj2_Chen %>%
+  filter(Par=="S") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z1 <- z01 %>%
+  ggplot(aes(est, number,colour=factor(Par_ma,levels=c("est","est_BBJ","est_TWB","est_UKB")))) + 
+  geom_point(position = position_dodge(0.5), size = 5, shape = 15)+
+  geom_pointrange(aes(xmin=est-1.96*SD, xmax=est+1.96*SD))+
+  facet_grid(category ~ Par, scales = "free", space = "free") +
+  ggpubr::theme_pubr(border = TRUE) +
+  #theme(strip.text.y = element_text(angle = 270, size = 20)) +
+  theme(strip.text.y = element_blank(),strip.text.x = element_text(angle = 0, size = 20,face = "bold"),
+        legend.position = "none") +
+  #scale_y_continuous(breaks=seq(2,36,3),labels=unique(parRes_df_ukbbj$trait_full)) +
+  scale_y_continuous(breaks=seq(2,nrow(z01),length.out=length(unique(z01$trait_full))),labels=unique(z01$trait_full)) +
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank(),
+        axis.text.y=element_text(size=10),
+        #panel.grid.major.y = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.y = element_line(color = "gray20", size = 0.3),
+        panel.grid.major.x = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.x = element_line(color = "gray60", size = 0.1)) +
+  xlim(-2,0.8) + geom_vline(xintercept = parRes_median_5_kcps2$S_median, linetype='dashed', col = '#f8766d') +
+  geom_vline(xintercept = parRes_median_5_bbj$S_median, linetype='dashed', col = '#7CAE00') +
+  geom_vline(xintercept = parRes_median_5_twb$S_median, linetype='dashed', col = '#00BFC4') +
+  geom_vline(xintercept = parRes_median_5_ukb$S_median, linetype='dashed', col = '#C77CFF') 
+
+# "#F8766D" "#00BA38" "#619CFF"
+# "#F8766D" "#7CAE00" "#00BFC4" "#C77CFF"
+# "#F8766D" "#A3A500" "#00BF7D" "#00B0F6" "#E76BF3"
+
+z02<-parRes_df_ukbbj2_Chen %>%
+  filter(Par=="SNP-based heritability") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z2<-z02 %>%
+  ggplot(aes(est, number,colour=factor(Par_ma,levels=c("est","est_BBJ","est_TWB","est_UKB")))) + 
+  geom_point(position = position_dodge(0.5), size = 5, shape = 15)+
+  geom_pointrange(aes(xmin=est-1.96*SD, xmax=est+1.96*SD))+
+  facet_grid(category ~ Par, scales = "free", space = "free") +
+  ggpubr::theme_pubr(border = TRUE) +
+  #theme(strip.text.y = element_text(angle = 270, size = 20)) +
+  theme(strip.text.y = element_blank(),strip.text.x = element_text(angle = 0, size = 20,face = "bold"),
+        legend.position = "none") +
+  scale_y_continuous(breaks=seq(2,nrow(z01),length.out=length(unique(z01$trait_full))),labels = NULL) +
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank(),
+        axis.text.y=element_blank(),
+        panel.grid.major.y = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.y = element_line(color = "gray20", size = 0.3),
+        panel.grid.major.x = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.x = element_line(color = "gray60", size = 0.1)) +
+  xlim(0,0.7) + geom_vline(xintercept = parRes_median_5_kcps2$`SNP-based heritability_median`, linetype='dashed', col = '#f8766d')  +
+  geom_vline(xintercept = parRes_median_5_bbj$`SNP-based heritability_median`, linetype='dashed', col = '#7CAE00') +
+    geom_vline(xintercept = parRes_median_5_twb_Chen$`SNP-based heritability_median`, linetype='dashed', col = '#00BFC4') +
+  geom_vline(xintercept = parRes_median_5_ukb$`SNP-based heritability_median`, linetype='dashed', col = '#C77CFF')
+
+z03<-parRes_df_ukbbj2_Chen %>%
+  filter(Par=="Polygenicity") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z3<-z03 %>%
+  ggplot(aes(est, number,colour=factor(Par_ma,levels=c("est","est_BBJ","est_TWB","est_UKB")))) + 
+  geom_point(position = position_dodge(0.5), size = 5, shape = 15)+
+  geom_pointrange(aes(xmin=est-1.96*SD, xmax=est+1.96*SD))+
+  facet_grid(category ~ Par, scales = "free", space = "free") +
+  ggpubr::theme_pubr(border = TRUE) +
+  theme(strip.text.y = element_text(angle = 270, size = 10)) +
+  theme(strip.text.x = element_text(angle = 0, size = 20,face = "bold")) +
+  labs(col="")+
+  scale_color_manual(labels = c("KCPS2", "BBJ","TWB", "UKB"), values=c("#f8766d", "#7CAE00",'#00BFC4','#C77CFF')) +
+  scale_y_continuous(breaks=seq(2,nrow(z01),length.out=length(unique(z01$trait_full))),labels = NULL) +
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank(),
+        axis.text.y=element_blank(),
+        panel.grid.major.y = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.y = element_line(color = "gray20", size = 0.3),
+        panel.grid.major.x = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.x = element_line(color = "gray60", size = 0.1),
+        legend.position = "top", legend.text = element_text(size=20)) +
+  xlim(0,0.06) + geom_vline(xintercept = parRes_median_5_kcps2$Polygenicity_median, linetype='dashed', col = '#f8766d')  +
+  geom_vline(xintercept = parRes_median_5_bbj$Polygenicity_median, linetype='dashed', col = '#7CAE00') +
+    geom_vline(xintercept = parRes_median_5_twb$Polygenicity_median, linetype='dashed', col = '#00BFC4') +
+  geom_vline(xintercept = parRes_median_5_ukb$Polygenicity_median, linetype='dashed', col = '#C77CFF')
+
+```
+
+```{r}
+#ukb+bbj
+mylegend<-g_legend(z3)
+
+# pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/LMM/genetic_architecture_kcps2_bbj_twb_ukb_Chen.pdf', height=8, width=15)
+pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/genetic_architecture_kcps2_bbj_twb_ukb_Chen_lm.pdf', height=8, width=15)
+grid.arrange(mylegend,
+             arrangeGrob(z1 + theme(legend.position="none"),
+                         z2 + theme(legend.position="none"),
+                         z3 + theme(legend.position="none"),
+                         nrow=1),
+             nrow=2,heights=c(1, 10))
+dev.off()
+
+#ggarrange(p1,p2,p3,ncol=3, bottom=bottom, common.legend=T, legend="top")
+```
+
+## Revision
+```{r}
+library(ggh4x)
+cbPalette <- c("#DB9D85", "#BFAA67", "#93B666", "#5CBD92", "#38BDBB", "#6CB4D9")
+
+ridiculous_strips <- strip_themed(
+     # Horizontal strips
+     # background_x = elem_list_rect(fill = c("limegreen", "dodgerblue")),
+     # text_x = elem_list_text(colour = c("dodgerblue", "limegreen"),
+     #                         face = c("bold", "bold")),
+     # by_layer_x = TRUE,
+     # Vertical strips
+     background_y = elem_list_rect(
+       fill = cbPalette
+     ),
+     text_y = elem_list_text(angle = c(360,360,360,360,360,360),
+                             face = rep("bold", 6),
+                             size=c(10,12,10,10,11,12)),
+     by_layer_y = FALSE
+)
+
+parRes_df_ukbbj2_Chen$category<-factor(parRes_df_ukbbj2_Chen$category,levels=c("Anthropometry","Metabolic","Hematological","Cardiovascular","Kidney","Liver"))
+
+parRes_df_ukbbj2_Chen$trait_full <- factor(
+  parRes_df_ukbbj2_Chen$trait_full, 
+  levels = c(
+  "Gamma-glutamyl Transferase","Glutamic pyruvic transaminase","Albumin","Total Bilirubin","Glutamic oxaloacetic transaminase",
+  "Creatinine","Uric acid",
+  "Diastolic blood pressure","Systolic blood pressure",
+  "Mean corpuscular hemoglobin","Mean corpuscular hemoglobin concentration","Mean corpuscular volume","Eosinophil","Platelet","White blood cell","Red blood cell","Hematocrit","Hemoglbin",
+  "High density lipoprotein","Triglyceride","Total cholestrol","Low density lipoprotein","Fasting blood sugar",
+  "Height","Body mass index","Weight","Waist circumference"))
+
+z01<-parRes_df_ukbbj2_Chen %>%
+  filter(Par=="S") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z1 <- z01 %>%
+ ggplot(aes(x = trait_full, y = est, 
+                colour = factor(Par_ma, levels = c("est", "est_BBJ", "est_TWB", "est_UKB")), 
+                shape = factor(Par_ma, levels = c("est", "est_BBJ", "est_TWB", "est_UKB"))
+                                         )) + 
+  geom_point(position = position_dodge(width = 0.7), size = 3) + # Plot points
+  geom_pointrange(aes(ymin = est - 1.96 * SD, ymax = est + 1.96 * SD), position = position_dodge(width = 0.7)) + # Add error bars
+  coord_flip() +  # Flip coordinates to make the y-axis horizontal
+  facet_grid2(category ~ Par, scales = "free", space = "free_y") +
+  # Adding vertical lines (which will appear as horizontal lines due to coord_flip)
+  geom_vline(xintercept = seq(0.5, length(unique(parRes_df_ukbbj2$trait)) - 0.5, by = 1), color = "grey80", linetype = "solid") +
+  
+  # Set legend and color settings
+  labs(col = "", shape = "") +  # Label for both color and shape
+    scale_color_manual(labels = c("KCPS2","BBJ","TWB","UKB"), values = c("#619CFF","#C77CFF","#00BFC4","green4")) +
+  scale_shape_manual(labels = c("KCPS2", "BBJ", "TWB", "UKB"), values = c(16, 17, 15, 3)) +  # Match shape and color labels
+  
+  ggpubr::theme_pubr(border = TRUE) +
+  
+  labs(x = NULL, y = NULL) +
+  ylim(-1.5,0.8) +
+  
+  # Add dashed vertical lines (flipped to horizontal due to coord_flip) for median lines
+  geom_hline(yintercept = parRes_median_5_kcps2$S_median, linetype = 'dashed', col = '#619CFF')  +
+  geom_hline(yintercept = parRes_median_5_bbj$S_median, linetype = 'dashed', col = '#C77CFF') +
+  geom_hline(yintercept = parRes_median_5_twb$S_median, linetype = 'dashed', col = '#00BFC4') +
+  geom_hline(yintercept = parRes_median_5_ukb$S_median, linetype = 'dashed', col = 'green4') +
+  
+  theme(legend.position = "none",
+        strip.text.y = element_blank(),
+        strip.text.x = element_text(angle = 0, size = 15, face = "bold"))
+
+z02<-parRes_df_ukbbj2_Chen %>%
+  filter(Par=="SNP-based heritability") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z2 <- z02 %>%
+ ggplot(aes(x = trait_full, y = est, 
+                colour = factor(Par_ma, levels = c("est", "est_BBJ", "est_TWB", "est_UKB")), 
+                shape = factor(Par_ma, levels = c("est", "est_BBJ", "est_TWB", "est_UKB"))
+                                         )) + 
+  geom_point(position = position_dodge(width = 0.7), size = 3) + # Plot points
+  geom_pointrange(aes(ymin = est - 1.96 * SD, ymax = est + 1.96 * SD), position = position_dodge(width = 0.7)) + # Add error bars
+  coord_flip() +  # Flip coordinates to make the y-axis horizontal
+  facet_grid2(category ~ Par, scales = "free", space = "free_y") +
+  # Adding vertical lines (which will appear as horizontal lines due to coord_flip)
+  geom_vline(xintercept = seq(0.5, length(unique(parRes_df_ukbbj2$trait)) - 0.5, by = 1), color = "grey80", linetype = "solid") +
+  
+  # Set legend and color settings
+  labs(col = "", shape = "") +  # Label for both color and shape
+    scale_color_manual(labels = c("KCPS2","BBJ","TWB","UKB"), values = c("#619CFF","#C77CFF","#00BFC4","green4")) +
+  scale_shape_manual(labels = c("KCPS2", "BBJ", "TWB", "UKB"), values = c(16, 17, 15, 3)) +  # Match shape and color labels
+  
+  ggpubr::theme_pubr(border = TRUE) +
+  
+  labs(x = NULL, y = NULL) +
+  ylim(0,0.7) +
+  
+  # Add dashed vertical lines (flipped to horizontal due to coord_flip) for median lines
+  geom_hline(yintercept = parRes_median_5_kcps2$`SNP-based heritability_median`, linetype = 'dashed', col = '#619CFF')  +
+  geom_hline(yintercept = parRes_median_5_bbj$`SNP-based heritability_median`, linetype = 'dashed', col = '#C77CFF') +
+  geom_hline(yintercept = parRes_median_5_twb$`SNP-based heritability_median`, linetype = 'dashed', col = '#00BFC4') +
+  geom_hline(yintercept = parRes_median_5_ukb$`SNP-based heritability_median`, linetype = 'dashed', col = 'green4') +
+  
+  theme(legend.position = "none",
+        strip.text.y = element_blank(),
+        axis.text.y=element_blank(),
+        strip.text.x = element_text(angle = 0, size = 15, face = "bold"))
+
+z03<-parRes_df_ukbbj2_Chen %>%
+  filter(Par=="Polygenicity") %>%
+  arrange(category,hsq_mean) %>%
+  mutate(number=order(category,hsq_mean))
+z3 <- z03 %>%
+ ggplot(aes(x = trait_full, y = est, 
+                colour = factor(Par_ma, levels = c("est", "est_BBJ", "est_TWB", "est_UKB")), 
+                shape = factor(Par_ma, levels = c("est", "est_BBJ", "est_TWB", "est_UKB"))
+                                         )) + 
+  geom_point(position = position_dodge(width = 0.7), size = 3) + # Plot points
+  geom_pointrange(aes(ymin = est - 1.96 * SD, ymax = est + 1.96 * SD), position = position_dodge(width = 0.7)) + # Add error bars
+  coord_flip() +  # Flip coordinates to make the y-axis horizontal
+  facet_grid2(category ~ Par, scales = "free", space = "free_y", labeller = label_wrap_gen(width = 2, multi_line = TRUE), strip = ridiculous_strips) +
+  # Adding vertical lines (which will appear as horizontal lines due to coord_flip)
+  geom_vline(xintercept = seq(0.5, length(unique(parRes_df_ukbbj2$trait)) - 0.5, by = 1), color = "grey80", linetype = "solid") +
+  
+  # Set legend and color settings
+  labs(col = "", shape = "") +  # Label for both color and shape
+    scale_color_manual(labels = c("KCPS2","BBJ","TWB","UKB"), values = c("#619CFF","#C77CFF","#00BFC4","green4")) +
+  scale_shape_manual(labels = c("KCPS2", "BBJ", "TWB", "UKB"), values = c(16, 17, 15, 3)) +  # Match shape and color labels
+  
+  ggpubr::theme_pubr(border = TRUE) +
+  
+  labs(x = NULL, y = NULL) +
+  ylim(0,0.06) +
+  
+  # Override aesthetics in the legend to modify error bar appearance
+  guides(
+    color = guide_legend(override.aes = list(
+      linetype = 0, # Remove line from the legend key
+      size = 1      # Increase the size of the points in the legend
+    )),
+    shape = guide_legend(override.aes = list(
+      linetype = 0, # Remove line from the legend key
+      size = 1      # Increase the size of the points in the legend
+    )),
+    # Modify error bars to appear horizontal in the legend by adjusting their height and width
+    linetype = guide_legend(override.aes = list(
+      ymin = 0, ymax = 0, width = 0.2  # Flatten the error bars horizontally
+    ))
+  ) +
+  
+  # Add dashed vertical lines (flipped to horizontal due to coord_flip) for median lines
+  geom_hline(yintercept = parRes_median_5_kcps2$Polygenicity_median, linetype = 'dashed', col = '#619CFF')  +
+  geom_hline(yintercept = parRes_median_5_bbj$Polygenicity_median, linetype = 'dashed', col = '#C77CFF') +
+  geom_hline(yintercept = parRes_median_5_twb$Polygenicity_median, linetype = 'dashed', col = '#00BFC4') +
+  geom_hline(yintercept = parRes_median_5_ukb$Polygenicity_median, linetype = 'dashed', col = 'green4') +
+  
+  theme(legend.position = "top", 
+        legend.text = element_text(size=20),
+        axis.text.y=element_blank(),
+        strip.text.x = element_text(angle = 0, size = 15, face = "bold"))
+
+```
+
+```{r}
+#extract legend
+#https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+mylegend<-g_legend(z3)
+
+bigz_Chen <- grid.arrange(mylegend,
+             arrangeGrob(z1 + theme(legend.position="none"),
+                         z2 + theme(legend.position="none"),
+                         z3 + theme(legend.position="none"),
+                         nrow=1),
+             nrow=2,heights=c(1, 10))
+
+# pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/LMM/genetic_architecture_kcps2_bbj_twb_ukb_Chen.pdf', height=8, width=15)
+pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/genetic_architecture_kcps2_bbj_twb_ukb_Chen_lm_10082024.pdf', height=8, width=15)
+ggarrange(bigz_Chen,labels = c("c"), nrow=1,font.label=list(size=20))
+dev.off()
+```
+
+
+#=======#
+# KCPS2 #
+#=======#
+#Plot by category
+```{r}
+library(ggh4x)
+cbPalette <- c("#DB9D85", "#BFAA67", "#93B666", "#5CBD92", "#38BDBB", "#6CB4D9","#ACA4E2","#D596D2","#E494AF")
+
+ridiculous_strips0 <- strip_themed(
+     # Horizontal strips
+     # background_x = elem_list_rect(fill = c("limegreen", "dodgerblue")),
+     # text_x = elem_list_text(colour = c("dodgerblue", "limegreen"),
+     #                         face = c("bold", "bold")),
+     # by_layer_x = TRUE,
+     # Vertical strips
+     background_y = elem_list_rect(
+       fill = cbPalette
+     ),
+     text_y = elem_list_text(size=rep(10,9)),
+     by_layer_y = FALSE
+)
+
+# p1<-parRes_df %>%
+#   filter(Par=="hsq") %>%
+#   ggplot(aes(est, trait)) +
+#   geom_point(position = position_dodge(0.5), size = 2)+
+#   facet_grid(category ~ ., scales = "free", space = "free") +
+#   theme(strip.text.y = element_text(angle = 0))
+
+p1<-parRes_df2 %>%
+  filter(Par=="S") %>%
+  ggplot(aes(est, trait_full,colour=factor(category))) + 
+  geom_point(position = position_dodge(0.5), size = 4, shape = 15)+
+  geom_pointrange(aes(xmin=est-1.96*SD, xmax=est+1.96*SD))+
+  facet_grid(category ~ Par, scales = "free", space = "free") +
+  ggpubr::theme_pubr(border = TRUE) +
+  #theme(strip.text.y = element_text(angle = 270, size = 20)) +
+  theme(strip.text.y = element_blank(),strip.text.x = element_text(angle = 0, size = 13,face = "bold"),
+        legend.position = "none") +
+  #scale_y_continuous(breaks=seq(1,length(trait_list)),labels=trait_list) +
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank(),
+        axis.text.y=element_text(size=10),
+        panel.grid.major.y = element_line(color = "gray60", size = 0.1),
+        panel.grid.major.x = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.x = element_line(color = "gray60", size = 0.1)) +
+  xlim(-1,0.8) + geom_vline(xintercept = parRes_median_KCPS2$S_median, linetype='dashed', col = 'black') 
+
+
+p2<-parRes_df2 %>%
+  filter(Par=="SNP-based heritability") %>%
+  ggplot(aes(est, trait_full,colour=factor(category))) + 
+  geom_point(position = position_dodge(0.5), size = 4, shape = 15)+
+  geom_pointrange(aes(xmin=est-1.96*SD, xmax=est+1.96*SD))+
+  facet_grid(category ~ Par, scales = "free", space = "free") +
+  ggpubr::theme_pubr(border = TRUE) +
+  theme(strip.text.y = element_blank(),strip.text.x = element_text(angle = 0, size = 13,face = "bold"),
+        legend.position = "none") +
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank(),
+        axis.text.y=element_blank(),axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_line(color = "gray60", size = 0.1),
+        panel.grid.major.x = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.x = element_line(color = "gray60", size = 0.1)) +
+  xlim(0,0.7) + geom_vline(xintercept = parRes_median_KCPS2$hsq_median, linetype='dashed', col = 'black') 
+
+p3<-parRes_df2 %>%
+  filter(Par=="Polygenicity") %>%
+  ggplot(aes(est, trait_full,colour=factor(category))) + 
+  geom_point(position = position_dodge(0.5), size = 4, shape = 15)+
+  geom_pointrange(aes(xmin=est-1.96*SD, xmax=est+1.96*SD))+
+  facet_grid2(category ~ Par, scales = "free", space = "free", labeller = label_wrap_gen(width = 2, multi_line = TRUE), strip = ridiculous_strips0) +
+
+  ggpubr::theme_pubr(border = TRUE) +
+  theme(strip.text.y = element_text(angle = 0, size = 15),strip.text.x = element_text(angle = 0, size = 13,face = "bold"),legend.position = "none") +
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank(),
+        axis.text.y=element_blank(),axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_line(color = "gray60", size = 0.1),
+        panel.grid.major.x = element_line(color = "gray60", size = 0.1),
+        panel.grid.minor.x = element_line(color = "gray60", size = 0.1)) +
+  xlim(0,0.06) + geom_vline(xintercept = parRes_median_KCPS2$Pi_median, linetype='dashed', col = 'black') 
+```
+
+```{r}
+bottom <- textGrob("Posterior Mean (SD)", gp = gpar(fontsize = 13, col="black"))
+
+pdf(file='/n/holylfs05/LABS/kraft_lab/Lab/yjee/GCTB/Plot/genetic_architecture_kcps2_lm_11102024.pdf', height=8, width=15)
+grid.arrange(p1,p2,p3,ncol=3, bottom=bottom)
+dev.off()
+```
+
